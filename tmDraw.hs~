@@ -50,21 +50,8 @@ initTape (vs, fs) = foldl' (f (vs, fs)) (Tape $ Map.empty) [0..length vs-1]
                                          ns = neighbors i fs
                                          ns' = orderNeighbors p (zip ns (map (vs !!) ns))
                                      in Tape $ Map.insert i (ColorBlank, (ns')) tape
-          
-          angle :: Vertex3 GLfloat -> Vertex3 GLfloat -> Vertex3 GLfloat -> Float
-          angle (Vertex3 p1 p2 p3) (Vertex3 r1 r2 r3) (Vertex3 x1 x2 x3) = 
-          
-          --angle :: Vertex3 GLfloat -> Vertex3 GLfloat -> Float
-          --angle (Vertex3 x1 y1 z1) (Vertex3 x2 y2 z2) = let d = x1*x2 + y1*y2 + z1*z2
-          --                                                  r1 = sqrt $ x1^^2 + y1^^2 + z1^^2
-          --                                                  r2 = sqrt $ x2^^2 + y2^^2 + z2^^2
-          --                                                  xn = y1 * z2 - z1 * y2
-          --                                                  yn = z1 * x2 - x1 * z2
-          --                                                  zn = x1 * y2 - y1 * x2
-          --                                                  s  = sqrt $ xn^^2 + yn^^2 + zn^^2                                                                                                                              
-          --                                                  
-          --                                              in --realToFrac $ acos (realToFrac d / (r1 * r2))
-          --                                                 realToFrac $ atan2 s d
+
+          angle = undefined
 
           order :: Vertex3 GLfloat -> Vertex3 GLfloat -> Vertex3 GLfloat -> Vertex3 GLfloat -> Ordering
           order p@(Vertex3 xp yp zp) (Vertex3 xr yr zr) (Vertex3 x1 y1 z1) (Vertex3 x2 y2 z2) =
@@ -74,12 +61,13 @@ initTape (vs, fs) = foldl' (f (vs, fs)) (Tape $ Map.empty) [0..length vs-1]
              in compare (angle p p_to_r p_to_x1) (angle p p_to_r p_to_x2)
 
           orderNeighbors :: Vertex3 GLfloat -> [(VertexIndex, Vertex3 GLfloat)] -> [VertexIndex]
+          orderNeighbors _ ns = map fst ns
           orderNeighbors p ns@((_,r):_) = map fst $ sortBy (\(i1, p1) (i2, p2) -> order p r p1 p2) ns
 
 randomTM :: Random.RandomGen g => Q -> Random.Rand g TM
 randomTM numQ = do trans <- mapM (\(q, c) -> do q' <- Random.getRandomR (0, numQ-1)
                                                 c' <- randomColor
-                                                d  <- Random.getRandomR (0,3)
+                                                d  <- Random.getRandomR (0,5)
                                                 return ((q, c), (q', c', d)))
                                  [(q, c) | q <- [0..numQ-1], c <- [ColorBlank, ColorRed, ColorGreen, ColorBlue]]
                    return (TM trans)
@@ -98,7 +86,7 @@ step (TM trans) (Config (oldId, curId) (Tape tape) q) = let Just (c, ns) = Map.l
                                                             Just (q', c', dir) = Data.List.lookup (q,c) trans
                                                             tape' = Tape $ Map.insert curId (c', ns) tape
                                                             Just refIdx = Data.List.elemIndex oldId ns
-                                                            newId = ns !! ((refIdx + dir + 1) `mod` 5)
+                                                            newId = ns !! ((refIdx + dir) `mod` 6)
                                                         in  Config (curId, newId) tape' q'
 
 normalizeVertex :: Vertex3 GLfloat -> Vertex3 GLfloat
@@ -281,7 +269,7 @@ idle :: IORef State -> GLUT.IdleCallback
 idle state = do
     modifyIORef state (\state -> state { state_t = state_t state + 1 })
     modifyIORef state (\state -> state { state_config = last (take 100 (iterate (step (state_tm state)) (state_config state))) })
-    threadDelay $ 100000
+    --threadDelay $ 100000
     GLUT.postRedisplay Nothing
     return ()
  
@@ -298,7 +286,7 @@ initfn = let light0 = Light 0
                --light light0 $= Enabled
                --lighting $= Enabled
                
-               --polygonMode $= (Line, Line)
+               polygonMode $= (Line, Line)
  
                depthFunc $= Just Lequal
  
