@@ -1,0 +1,1 @@
+ghc --make -O3 tmDraw && tmDraw.exe
