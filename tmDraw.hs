@@ -1,7 +1,13 @@
 import Graphics.Rendering.OpenGL
 import qualified Graphics.UI.GLUT as GLUT
 import Data.IORef
+import Data.Array
+import Matrix.LU
+import Unsafe.Coerce
 import Data.List
+import Foreign.C.Types 
+import qualified GHC.Float as Float
+import GHC.Float (Float)
 import qualified Data.Map as Map
 import Data.Map (Map)
 import qualified Data.Set as Set
@@ -48,21 +54,54 @@ initTape (vs, fs) = foldl' (f (vs, fs)) (Tape $ Map.empty) [0..length vs-1]
     where f :: ([Vertex3 GLfloat], [[VertexIndex]]) -> Tape -> VertexIndex -> Tape
           f (vs, fs) (Tape tape) i = let p = vs !! i
                                          ns = neighbors i fs
-                                         ns' = orderNeighbors p (zip ns (map (vs !!) ns))
+                                         ns' = if (length (orderNeighbors p (zip ns (map (vs !!) ns))) == 5)
+                                               then case i of
+                                                    0 -> 2:(orderNeighbors p (zip ns (map (vs !!) ns)))
+                                                    1 -> 3:(orderNeighbors p (zip ns (map (vs !!) ns)))
+                                                    2 -> 0:(orderNeighbors p (zip ns (map (vs !!) ns)))
+                                                    3 -> 1:(orderNeighbors p (zip ns (map (vs !!) ns)))
+                                                    4 -> 6:(orderNeighbors p (zip ns (map (vs !!) ns)))
+                                                    5 -> 7:(orderNeighbors p (zip ns (map (vs !!) ns)))
+                                                    6 -> 4:(orderNeighbors p (zip ns (map (vs !!) ns)))
+                                                    7 -> 5:(orderNeighbors p (zip ns (map (vs !!) ns)))
+                                                    8 -> 10:(orderNeighbors p (zip ns (map (vs !!) ns)))
+                                                    9 -> 11:(orderNeighbors p (zip ns (map (vs !!) ns)))
+                                                    10 -> 8:(orderNeighbors p (zip ns (map (vs !!) ns)))
+                                                    11 -> 9:(orderNeighbors p (zip ns (map (vs !!) ns)))
+                                               else orderNeighbors p (zip ns (map (vs !!) ns))
                                      in Tape $ Map.insert i (ColorBlank, (ns')) tape
 
-          {-angle = undefined
-
-          order :: Vertex3 GLfloat -> Vertex3 GLfloat -> Vertex3 GLfloat -> Vertex3 GLfloat -> Ordering
-          order p@(Vertex3 xp yp zp) (Vertex3 xr yr zr) (Vertex3 x1 y1 z1) (Vertex3 x2 y2 z2) =
-             let p_to_r = Vertex3 (xr-xp) (yr-yp) (zr-zp)
-                 p_to_x1 = Vertex3 (x1-xp) (y1-yp) (z1-zp)
-                 p_to_x2 = Vertex3 (x2-xp) (y2-yp) (z2-zp)
-             in compare (angle p p_to_r p_to_x1) (angle p p_to_r p_to_x2)-}
-
           orderNeighbors :: Vertex3 GLfloat -> [(VertexIndex, Vertex3 GLfloat)] -> [VertexIndex]
-          orderNeighbors _ ns = map fst ns
-          --orderNeighbors p ns@((_,r):_) = map fst $ sortBy (\(i1, p1) (i2, p2) -> order p r p1 p2) ns
+          orderNeighbors p ns@((_,r):_) = map fst $ sortBy (\(i1, p1) (i2, p2) -> order p r p1 p2) ns
+
+order :: Vertex3 GLfloat -> Vertex3 GLfloat -> Vertex3 GLfloat -> Vertex3 GLfloat -> Ordering
+order p r p1 p2 = compare (atan2 yP1'' xP1'') (atan2 yP2'' xP2'')
+    where (Vertex3 xP yP zP) = normalizeVertex p
+          (Vertex3 xP1 yP1 zP1) = projectToPlane p1
+          (Vertex3 xP2 yP2 zP2) = projectToPlane p2
+          
+          projectToPlane :: Vertex3 GLfloat -> Vertex3 GLfloat
+          projectToPlane (Vertex3 x y z) = normalizeVertex $ Vertex3 (x * (1 - (xP * xP))    + y * (negate (yP * xP)) + z * (negate (zP * xP)))
+                                                                     (x * (negate (xP * yP)) + y * (1 - (yP * yP))    + z * (negate (zP * yP)))
+                                                                     (x * (negate (xP * zP)) + y * (negate (yP * zP)) + z * (1 - (zP * zP)))
+          
+          (Vertex3 xR yR zR) = projectToPlane r
+          (Vertex3 xR' yR' zR') = normalizeVertex $ Vertex3 (yP * zR - zP * yR)
+                                                                 (zP * xR - xP * zR)
+                                                                 (xP * yR - yP * xR)
+          
+          xP1'' = (f (array (1,3) (zip [1,2,3] (map g [xP1,yP1,zP1])))) ! 1
+          yP1'' = (f (array (1,3) (zip [1,2,3] (map g [xP1,yP1,zP1])))) ! 2
+          xP2'' = (f (array (1,3) (zip [1,2,3] (map g [xP2,yP2,zP2])))) ! 1
+          yP2'' = (f (array (1,3) (zip [1,2,3] (map g [xP2,yP2,zP2])))) ! 2
+          g (CFloat a) = Float.float2Double a
+          f :: Array Int Double -> Array Int Double
+          f = lu_solve (array ((1,1),(3,3)) (zip 
+                                             [(i,j) | i<-[1,2,3], j<-[1,2,3]] 
+                                             (map g [xR,xR',xP,
+                                                     yR,yR',yP,
+                                                     zR,zR',zP])))
+          
 
 randomTM :: Random.RandomGen g => Q -> Random.Rand g TM
 randomTM numQ = do trans <- mapM (\(q, c) -> do q' <- Random.getRandomR (0, numQ-1)
@@ -251,11 +290,11 @@ keyboardMouse state (GLUT.Char 't') GLUT.Down _ _ = do
 keyboardMouse state (GLUT.Char 'w') GLUT.Down _ _ = do
     camera <- state_camera `fmap` readIORef state
     let Camera { camera_r = r , camera_theta = theta , camera_phi = phi } = camera
-    modifyIORef state (\state -> state { state_camera = Camera { camera_r = r , camera_theta = theta + 0.05, camera_phi = phi }})
+    modifyIORef state (\state -> state { state_camera = Camera { camera_r = r , camera_theta = theta + 0.1, camera_phi = phi }})
 keyboardMouse state (GLUT.Char 's') GLUT.Down _ _ = do
     camera <- state_camera `fmap` readIORef state
     let Camera { camera_r = r , camera_theta = theta , camera_phi = phi } = camera
-    modifyIORef state (\state -> state { state_camera = Camera { camera_r = r , camera_theta = theta , camera_phi = phi + 0.05}})
+    modifyIORef state (\state -> state { state_camera = Camera { camera_r = r , camera_theta = theta , camera_phi = phi + 0.1}})
 keyboardMouse _ _ _ _ _ = return ()
 
 display :: IORef State -> GLUT.DisplayCallback
@@ -268,7 +307,7 @@ display state = do
 idle :: IORef State -> GLUT.IdleCallback
 idle state = do
     modifyIORef state (\state -> state { state_t = state_t state + 1 })
-    modifyIORef state (\state -> state { state_config = last (take 100 (iterate (step (state_tm state)) (state_config state))) })
+    modifyIORef state (\state -> state { state_config = last (take 5 (iterate (step (state_tm state)) (state_config state))) })
     --threadDelay $ 100000
     GLUT.postRedisplay Nothing
     return ()
@@ -309,16 +348,17 @@ main = do
   GLUT.createWindow "red 3D lighted cube"
   GLUT.windowSize $= Size 1280 1024
 
-  tm <- Random.evalRandIO (randomTM 3)
-  print tm
+  --tm <- Random.evalRandIO (randomTM 3)
+  --print tm
 
-  let myTm = TM [ ((q,c),(q,ColorGreen,0))  | q <- [0..2], c <- [ColorBlank,ColorRed,ColorGreen,ColorBlue]]
+  let myTm = TM [ ((q,c),(q,ColorGreen,3))  | q <- [0..2], c <- [ColorBlank,ColorRed,ColorGreen,ColorBlue]]
+  
+  let tm = myTm  
 
-  let globe@(globe_vs, globe_fs) = (iterate split icosahedron) !! 5
+  let globe@(globe_vs, globe_fs) = (iterate split icosahedron) !! 5 
       tape = initTape globe
       globe_map = Map.fromList (zip [0..] globe_vs)
       firstSucc = head $ neighbors 0 globe_fs
-  print $ neighbors 0 globe_fs
 
   state <- newIORef $ State { state_config = Config (0, firstSucc) tape 0
                             , state_camera = Camera { camera_r = 5
