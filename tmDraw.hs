@@ -54,21 +54,7 @@ initTape (vs, fs) = foldl' (f (vs, fs)) (Tape $ Map.empty) [0..length vs-1]
     where f :: ([Vertex3 GLfloat], [[VertexIndex]]) -> Tape -> VertexIndex -> Tape
           f (vs, fs) (Tape tape) i = let p = vs !! i
                                          ns = neighbors i fs
-                                         ns' = if (length (orderNeighbors p (zip ns (map (vs !!) ns))) == 5)
-                                               then case i of
-                                                    0 -> 2:(orderNeighbors p (zip ns (map (vs !!) ns)))
-                                                    1 -> 3:(orderNeighbors p (zip ns (map (vs !!) ns)))
-                                                    2 -> 0:(orderNeighbors p (zip ns (map (vs !!) ns)))
-                                                    3 -> 1:(orderNeighbors p (zip ns (map (vs !!) ns)))
-                                                    4 -> 6:(orderNeighbors p (zip ns (map (vs !!) ns)))
-                                                    5 -> 7:(orderNeighbors p (zip ns (map (vs !!) ns)))
-                                                    6 -> 4:(orderNeighbors p (zip ns (map (vs !!) ns)))
-                                                    7 -> 5:(orderNeighbors p (zip ns (map (vs !!) ns)))
-                                                    8 -> 10:(orderNeighbors p (zip ns (map (vs !!) ns)))
-                                                    9 -> 11:(orderNeighbors p (zip ns (map (vs !!) ns)))
-                                                    10 -> 8:(orderNeighbors p (zip ns (map (vs !!) ns)))
-                                                    11 -> 9:(orderNeighbors p (zip ns (map (vs !!) ns)))
-                                               else orderNeighbors p (zip ns (map (vs !!) ns))
+                                         ns' = orderNeighbors p (zip ns (map (vs !!) ns))
                                      in Tape $ Map.insert i (ColorBlank, (ns')) tape
 
           orderNeighbors :: Vertex3 GLfloat -> [(VertexIndex, Vertex3 GLfloat)] -> [VertexIndex]
@@ -87,8 +73,8 @@ order p r p1 p2 = compare (atan2 yP1'' xP1'') (atan2 yP2'' xP2'')
           
           (Vertex3 xR yR zR) = projectToPlane r
           (Vertex3 xR' yR' zR') = normalizeVertex $ Vertex3 (yP * zR - zP * yR)
-                                                                 (zP * xR - xP * zR)
-                                                                 (xP * yR - yP * xR)
+                                                            (zP * xR - xP * zR)
+                                                            (xP * yR - yP * xR)
           
           xP1'' = (f (array (1,3) (zip [1,2,3] (map g [xP1,yP1,zP1])))) ! 1
           yP1'' = (f (array (1,3) (zip [1,2,3] (map g [xP1,yP1,zP1])))) ! 2
@@ -125,7 +111,24 @@ step (TM trans) (Config (oldId, curId) (Tape tape) q) = let Just (c, ns) = Map.l
                                                             Just (q', c', dir) = Data.List.lookup (q,c) trans
                                                             tape' = Tape $ Map.insert curId (c', ns) tape
                                                             Just refIdx = Data.List.elemIndex oldId ns
-                                                            newId = ns !! ((refIdx + dir) `mod` 6)
+                                                            newId = if (length ns == 5)
+                                                                    then if (dir /= 6) 
+                                                                         then ns !! ((refIdx + dir) `mod` 5)
+                                                                         else case curId of
+                                                                              0 -> 2 
+                                                                              1 -> 3
+                                                                              2 -> 0
+                                                                              3 -> 1
+                                                                              4 -> 6
+                                                                              5 -> 7
+                                                                              6 -> 4
+                                                                              7 -> 5
+                                                                              8 -> 10
+                                                                              9 -> 11
+                                                                              10 -> 8
+                                                                              11 -> 9
+                                                                              _ -> error "this shouldn't happen" 
+                                                                    else ns !! ((refIdx + dir) `mod` 6)
                                                         in  Config (curId, newId) tape' q'
 
 normalizeVertex :: Vertex3 GLfloat -> Vertex3 GLfloat
@@ -307,8 +310,8 @@ display state = do
 idle :: IORef State -> GLUT.IdleCallback
 idle state = do
     modifyIORef state (\state -> state { state_t = state_t state + 1 })
-    modifyIORef state (\state -> state { state_config = last (take 5 (iterate (step (state_tm state)) (state_config state))) })
-    --threadDelay $ 100000
+    modifyIORef state (\state -> state { state_config = last (take 2 (iterate (step (state_tm state)) (state_config state))) })
+    threadDelay $ 100000
     GLUT.postRedisplay Nothing
     return ()
  
@@ -345,7 +348,7 @@ main :: IO ()
 main = do
   GLUT.getArgsAndInitialize
   GLUT.initialDisplayMode $= [GLUT.DoubleBuffered, GLUT.RGBMode, GLUT.WithDepthBuffer]
-  GLUT.createWindow "red 3D lighted cube"
+  GLUT.createWindow "Sphere-Band TM"
   GLUT.windowSize $= Size 1280 1024
 
   --tm <- Random.evalRandIO (randomTM 3)
@@ -355,12 +358,12 @@ main = do
   
   let tm = myTm  
 
-  let globe@(globe_vs, globe_fs) = (iterate split icosahedron) !! 5 
+  let globe@(globe_vs, globe_fs) = (iterate split icosahedron) !! 5
       tape = initTape globe
       globe_map = Map.fromList (zip [0..] globe_vs)
       firstSucc = head $ neighbors 0 globe_fs
 
-  state <- newIORef $ State { state_config = Config (0, firstSucc) tape 0
+  state <- newIORef $ State { state_config = Config (firstSucc,0) tape 0
                             , state_camera = Camera { camera_r = 5
                                                     , camera_theta = 0
                                                     , camera_phi = 0
