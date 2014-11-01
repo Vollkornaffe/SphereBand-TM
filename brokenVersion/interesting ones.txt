@@ -1,0 +1,5 @@
+TM [((0,ColorBlank),(0,ColorRed,3)),((0,ColorRed),(1,ColorGreen,0)),((0,ColorGre
+en),(0,ColorRed,3)),((0,ColorBlue),(1,ColorGreen,0)),((1,ColorBlank),(0,ColorGre
+en,3)),((1,ColorRed),(1,ColorBlue,3)),((1,ColorGreen),(0,ColorRed,3)),((1,ColorB
+lue),(0,ColorGreen,2)),((2,ColorBlank),(0,ColorGreen,4)),((2,ColorRed),(1,ColorR
+ed,3)),((2,ColorGreen),(2,ColorGreen,0)),((2,ColorBlue),(0,ColorBlue,4))]

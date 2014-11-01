@@ -1,0 +1,425 @@
+import Graphics.Rendering.OpenGL
+import qualified Graphics.UI.GLUT as GLUT
+import Data.IORef
+import Data.Array
+import Matrix.LU
+import Unsafe.Coerce
+import Data.List
+import Data.Maybe (fromJust)
+import Foreign.C.Types 
+import qualified GHC.Float as Float
+import GHC.Float (Float)
+import qualified Data.Map as Map
+import Data.Map (Map)
+import qualified Data.Set as Set
+import Data.Set (Set)
+import qualified Control.Monad.Random as Random
+import Debug.Trace
+import Control.Concurrent (threadDelay)
+import Math.LinearEquationSolver
+
+data Camera = Camera { camera_r :: Float
+                     , camera_theta :: Float
+                     , camera_phi :: Float
+                     }
+
+type VId = Int
+type Mesh = (Map VId (Vertex3 GLfloat), [[VId]])
+
+data State = State { state_config :: Config
+                   , state_camera :: Camera
+                   , state_t :: Int
+                   , state_globe :: Mesh
+                   , state_globe_map :: Map VId (Vertex3 GLfloat)
+                   , state_position :: VId
+                   , state_tm :: TM
+                   }
+
+data TapeColor = ColorBlank | ColorRed | ColorGreen | ColorBlue deriving (Show,Eq)
+type Q = Int
+data Tape = Tape !(Map VId (TapeColor, [VId])) deriving Show
+data Config = Config (VId, VId) Tape Q
+type Direction = Int
+data TM = TM ![((Q, TapeColor), (Q, TapeColor, Direction))] deriving Show
+
+removeDups :: Ord a => [a] -> Set a -> [a]
+removeDups [] sofar = []
+removeDups (x:rest) sofar
+     | Set.member x sofar = (removeDups rest sofar)
+     | otherwise          = x:(removeDups rest (Set.insert x sofar))
+
+neighbors :: VId -> [[VId]] -> [VId]
+neighbors i = (\ns -> removeDups ns Set.empty) . concat . map (filter (/= i)) . filter (i `elem`)
+
+initTape :: Mesh -> Tape
+initTape mesh@(vs, fs) = Tape $ Map.mapWithKey (f mesh) vs --foldl' (f (vs, fs)) (Tape $ Map.empty) (Map.keys vs)
+    where f :: Mesh -> VId -> Vertex3 GLfloat -> (TapeColor, [VId])
+          f (vs, fs) i p = let ns = neighbors i fs
+                               ns' = orderNeighbors p (zip ns (map (fromJust . flip Map.lookup vs) ns))
+                           in (ColorBlank, (ns'))
+
+          orderNeighbors :: Vertex3 GLfloat -> [(VId, Vertex3 GLfloat)] -> [VId]
+          orderNeighbors p ns@((_,r):_) = map fst $ sortBy (\(i1, p1) (i2, p2) -> order p r p1 p2) ns
+
+          relative p n =
+              let (phi, theta) = spherical p
+                  (phi', theta') = spherical n
+              in (phi-phi', theta-theta')
+
+order :: Vertex3 GLfloat -> Vertex3 GLfloat -> Vertex3 GLfloat -> Vertex3 GLfloat -> Ordering
+order p r p1 p2 = {-trace (show ((atan2 yP1'' xP1''),(atan2 yP2'' xP2''))) $-} (compare (atan2 yP1'' xP1'') (atan2 yP2'' xP2''))
+    where (Vertex3 xP yP zP) = normalizeVertex p
+          (Vertex3 xP1 yP1 zP1) = projectToPlane p1
+          (Vertex3 xP2 yP2 zP2) = projectToPlane p2
+          
+          projectToPlane :: Vertex3 GLfloat -> Vertex3 GLfloat
+          projectToPlane (Vertex3 x y z) = normalizeVertex $ Vertex3 (-x*xP*xP - yP*y*xP - zP*z*xP + x)
+                                                                     (-y*yP*yP - xP*x*yP - zP*z*yP + y)
+                                                                     (-z*zP*zP - xP*x*zP - xP*y*zP + z)
+                                                                     --(x * (negate (xP * xP)) + y * (negate (yP * xP)) + z * (negate (zP * xP)))
+                                                                     --(x * (negate (xP * yP)) + y * (negate (yP * yP)) + z * (negate (zP * yP)))
+                                                                     --(x * (negate (xP * zP)) + y * (negate (yP * zP)) + z * (negate (zP * zP)))
+          
+          (Vertex3 xR yR zR) = projectToPlane r
+          (Vertex3 xR' yR' zR') = normalizeVertex $ Vertex3 (yP * zR - zP * yR)
+                                                            (zP * xR - xP * zR)
+                                                            (xP * yR - yP * xR)
+          
+          xP1'' = (f (array (1,3) (zip [1,2,3] (map g [xP1,yP1,zP1])))) ! 1
+          yP1'' = (f (array (1,3) (zip [1,2,3] (map g [xP1,yP1,zP1])))) ! 2
+          xP2'' = (f (array (1,3) (zip [1,2,3] (map g [xP2,yP2,zP2])))) ! 1
+          yP2'' = (f (array (1,3) (zip [1,2,3] (map g [xP2,yP2,zP2])))) ! 2
+          g (CFloat a) = Float.float2Double a
+          f :: Array Int Double -> Array Int Double
+          f = lu_solve (array ((1,1),(3,3)) (zip 
+                                             [(i,j) | i<-[1,2,3], j<-[1,2,3]] 
+                                             (map g [xR,xR',xP,
+                                                     yR,yR',yP,
+                                                     zR,zR',zP])))
+spherical (Vertex3 x y z) = 
+              let phi = atan2 z (sqrt (x*x+y*y)) --atan (y / x)
+                  theta = atan2 y x --atan (sqrt (x*x + y*y) / z)
+              in (phi, theta)
+
+order2 p p1 p2 =
+    let (phi1, theta1) = spherical p1
+        (phi2, theta2) = spherical p2
+        (phi, theta) = spherical p
+
+        phi_d1 = phi1 - phi
+        theta_d1 = theta1 - theta
+
+        phi_d2 = phi2 - phi
+        theta_d2 = theta2 - theta
+    in trace (show phi_d1 ++ "/" ++ show theta_d1 ++ " AND " ++ show phi_d2 ++ "/" ++ show theta_d2) (if phi1 < phi2 || theta1 < theta2
+       then LT
+       else GT)
+          
+
+randomTM :: Random.RandomGen g => Q -> Random.Rand g TM
+randomTM numQ = do trans <- mapM (\(q, c) -> do q' <- Random.getRandomR (0, numQ-1)
+                                                c' <- randomColor
+                                                d  <- Random.getRandomR (0,5)
+                                                return ((q, c), (q', c', d)))
+                                 [(q, c) | q <- [0..numQ-1], c <- [ColorBlank, ColorRed, ColorGreen, ColorBlue]]
+                   return (TM trans)
+
+    where 
+      randomColor ::  Random.RandomGen g => Random.Rand g TapeColor
+      randomColor = do i <- Random.getRandomR (0, 2) 
+                       return $ case i :: Int of
+                                  0 -> ColorRed
+                                  1 -> ColorGreen
+                                  2 -> ColorBlue
+
+move :: (Q, TapeColor, Direction) -> Config -> Config
+move (q', c', dir) (Config (oldId, curId) (Tape tape) q) = let Just (c, ns) = Map.lookup curId tape
+                                                               tape' = Tape $ Map.insert curId (c', ns) tape
+                                                               Just refIdx = Data.List.elemIndex oldId ns
+                                                               newId = if (length ns == 5)
+                                                                       then if (dir /= 6) 
+                                                                            then ((refIdx + dir) `mod` 5)
+                                                                            else case curId of
+                                                                                 0 -> 2 
+                                                                                 1 -> 3
+                                                                                 2 -> 0
+                                                                                 3 -> 1
+                                                                                 4 -> 6
+                                                                                 5 -> 7
+                                                                                 6 -> 4
+                                                                                 7 -> 5
+                                                                                 8 -> 10
+                                                                                 9 -> 11
+                                                                                 10 -> 8
+                                                                                 11 -> 9
+                                                                                 _ -> error "this shouldn't happen" 
+                                                                       else ((refIdx + dir) `mod` 6)
+                                                           in Config (curId, newId) tape' q'
+                                             
+step :: TM -> Config -> Config
+step (TM trans) config@(Config (oldId, curId) (Tape tape) q) = let Just (c, ns) = Map.lookup curId tape
+                                                                   Just t = Data.List.lookup (q,c) trans
+                                                               in move t config 
+
+normalizeVertex :: Vertex3 GLfloat -> Vertex3 GLfloat
+normalizeVertex (Vertex3 x y z) = let r = sqrt $ x^^2 + y^^2 + z^^2
+                                  in Vertex3 (x / r) (y / r) (z / r)
+                     
+icosahedron_v :: [Vertex3 GLfloat]
+icosahedron_v = let t = (1.0 + sqrt(5.0)) / 2.0
+                in [ normalizeVertex $ Vertex3 (-1)  t  0
+                   , normalizeVertex $ Vertex3  1  t  0
+                   , normalizeVertex $ Vertex3 (-1) (-t)  0
+                   , normalizeVertex $ Vertex3  1 (-t)  0
+                  
+                   , normalizeVertex $ Vertex3  0 (-1)  t
+                   , normalizeVertex $ Vertex3  0  1  t
+                   , normalizeVertex $ Vertex3  0 (-1) (-t)
+                   , normalizeVertex $ Vertex3  0  1 (-t)
+                  
+                   , normalizeVertex $ Vertex3  t  0 (-1)
+                   , normalizeVertex $ Vertex3  t  0  1
+                   , normalizeVertex $ Vertex3 (-t)  0 (-1)
+                   , normalizeVertex $ Vertex3 (-t)  0  1
+                   ]
+                    
+icosahedron_color :: [Color4 GLfloat]
+icosahedron_color = [ Color4 1.0 0.0 0.0 1.0
+                    , Color4 0.0 1.0 0.0 1.0
+                    , Color4 0.0 0.0 1.0 1.0
+                    , Color4 0.5 0.5 1.0 1.0
+                     
+                    , Color4 0.0 0.5 0.0 1.0
+                    , Color4 0.5 0.0 0.5 1.0
+                    , Color4 0.5 1.0 0.0 1.0
+                    , Color4 0.8 0.8 0.8 1.0
+                     
+                    , Color4 1.0 0.0 1.0 1.0
+                    , Color4 0.2 0.4 0.6 1.0
+                    , Color4 8.8 1.0 99.0 1.0
+                    , Color4 0.2 0.2 0.2 1.0
+                    ]
+                    
+icosahedron_faces :: [[VId]]
+icosahedron_faces = [[0,11,5], [0,5,1], [0,1,7], [0,7,10], [0,10,11],
+                     [1,5,9], [5,11,4], [11,10,2], [10,7,6], [7,1,8],
+                     [3,9,4], [3,4,2], [3,2,6], [3,6,8], [3,8,9],
+                     [4,9,5], [2,4,11], [6,2,10], [8,6,7], [9,8,1]]
+
+icosahedron :: Mesh
+icosahedron = (Map.fromList (zip [0..] icosahedron_v), icosahedron_faces)
+
+type SplitCache = Map (VId, VId) VId
+          
+split :: Mesh -> Mesh
+split (vs, fs) = let (mesh, _) = foldl' f ((vs, []), Map.empty) fs
+                 in mesh
+    where f :: (Mesh, SplitCache) -> [VId] -> (Mesh, SplitCache)
+          f ((vs, fs), sc) [i1,i2,i3] = let (a, (vs',   sc'))   = get_middle i1 i2 (vs, sc)
+                                            (b, (vs'',  sc''))  = get_middle i2 i3 (vs', sc')
+                                            (c, (vs''', sc''')) = get_middle i3 i1 (vs'', sc'')
+                                            
+                                            f1 = [i1, a, c]
+                                            f2 = [i2, b, a]
+                                            f3 = [i3, c, b]
+                                            f4 = [a, b, c]
+                                        in ((vs''', f1:f2:f3:f4:fs), sc''')
+                                            
+          get_middle :: VId -> VId -> (Map Int (Vertex3 GLfloat), SplitCache) -> (VId, (Map Int (Vertex3 GLfloat), SplitCache))
+          get_middle i1 i2 mesh@(vs, sc) = case Map.lookup (min i1 i2, max i1 i2) sc of
+                                               Just i -> (i, mesh)
+                                               Nothing -> let m = calc_middle (fromJust $ Map.lookup i1 vs) (fromJust $ Map.lookup i2 vs)
+                                                              i = Map.size vs
+                                                              vs' = Map.insert i m vs
+                                                              sc' = Map.insert (min i1 i2, max i1 i2) i sc
+                                                          in (i, (vs', sc'))
+                                                        
+          calc_middle :: Vertex3 GLfloat -> Vertex3 GLfloat -> Vertex3 GLfloat
+          calc_middle (Vertex3 x1 y1 z1) (Vertex3 x2 y2 z2) = let xm  = ((x1+x2)*0.5)
+                                                                  ym  = ((y1+y2)*0.5)
+                                                                  zm  = ((z1+z2)*0.5)
+                                                              in normalizeVertex $ Vertex3 xm ym zm
+               
+drawSphere :: IORef State -> IO ()
+drawSphere state =  do (vertices, faces) <- state_globe `fmap` readIORef state
+                       globe_map <- state_globe_map `fmap` readIORef state
+                       Config p (Tape tape) _ <- state_config `fmap` readIORef state
+
+                       renderPrimitive Triangles $ mapM_ (\[i0, i1, i2] ->
+                           do let (Just v0) = Map.lookup i0 globe_map
+                              let (Just v1) = Map.lookup i1 globe_map
+                              let (Just v2) = Map.lookup i2 globe_map
+                              let (Just c0) = c `fmap` fst `fmap` Map.lookup i0 tape
+                              let (Just c1) = c `fmap` fst `fmap` Map.lookup i1 tape
+                              let (Just c2) = c `fmap` fst `fmap` Map.lookup i2 tape
+
+                              color c0
+                              vertex v0
+                              color c1
+                              vertex v1
+                              color c2
+                              vertex v2) faces
+    where --c :: Int -> Color4 GLfloat
+          --c i = Color4 (realToFrac $ sin (fromIntegral i)) (realToFrac $ (fromIntegral i/1005.0)) (realToFrac $ (fromIntegral i)/500.0) 1.0
+          --c i = Color4 (realToFrac $ fromIntegral i) (realToFrac $ fromIntegral i)  (realToFrac $ fromIntegral i) 1.0
+          
+          c :: TapeColor -> Color4 GLfloat
+          c ColorBlank = Color4 0 0 0 1
+          c ColorRed   = Color4 1 0 0 1
+          c ColorGreen = Color4 0 1 0 1
+          c ColorBlue  = Color4 0 0 1 1
+          
+          --ctest :: VId -> [VId] -> Color4 GLfloat
+          --ctest p ns = let Just idx = List.elemIndex p ns
+          --                 x = fromRational idx / 5.0
+          --             in Color4 x x x 1.0
+ 
+calcCamPos :: Camera -> Vertex3 GLdouble
+calcCamPos Camera { camera_r = r , camera_theta = theta , camera_phi = phi } = Vertex3 (realToFrac $ r*(sin theta)*(cos phi)) (realToFrac $ r*(sin theta)*(sin phi)) (realToFrac $ r*(cos theta))
+ 
+setupDisplay :: IORef State -> GLUT.DisplayCallback
+setupDisplay state = do
+    (vertices, _) <- state_globe `fmap` readIORef state
+    Config (_, p) _ q <- state_config `fmap` readIORef state
+    --print q
+    i <- state_t `fmap` readIORef state
+    let Vertex3 px py pz = fromJust $ Map.lookup p vertices 
+    let dist = 3
+    let camPos = Vertex3 (realToFrac $ px * dist) (realToFrac $ py * dist) (realToFrac $ pz * dist) :: Vertex3 GLdouble
+    
+    matrixMode $= Modelview 0
+    loadIdentity
+    
+    camera <- state_camera `fmap` readIORef state
+    let cameraPos = calcCamPos camera
+    lookAt (camPos) (Vertex3 0.0 0.0 0.0) (Vector3 0.0 1.0 0.0)
+    --lookAt camPos (Vertex3 0.0 0.0 0.0) (Vector3 0.0 1.0 0.0)
+  
+    translate ((Vector3 0.0 0.0 (-0.0))::Vector3 GLfloat)
+    --print i
+    --rotate 60.0    ((Vector3 1.0 0.0 0.0)::Vector3 GLfloat)
+    --rotate (-20 + fromIntegral i) ((Vector3 0.0 0.0 1.0)::Vector3 GLfloat)
+    --lookAt pos look (Vector3 0.0 1.0 0.0)
+
+    --translate ((Vector3 0.0 0.0 (-1.0))::Vector3 GLfloat)
+    --rotate 60    ((Vector3 1.0 0.0 0.0)::Vector3 GLfloat)
+    --rotate (-20) ((Vector3 0.0 0.0 1.0)::Vector3 GLfloat)
+    
+keyboardMouse :: IORef State -> GLUT.Key -> GLUT.KeyState -> GLUT.Modifiers -> GLUT.Position -> IO ()
+keyboardMouse state (GLUT.Char 'r') GLUT.Down _ _ = do
+    tm <- Random.evalRandIO (randomTM 3)
+    print tm
+    modifyIORef state (\state -> state { state_tm = tm })
+keyboardMouse state (GLUT.Char 't') GLUT.Down _ _ = do
+    tm <- Random.evalRandIO (randomTM 3)
+    print tm
+    modifyIORef state (\state -> state { state_tm = tm })
+    Config x (Tape oldTape) x' <- state_config `fmap` readIORef state
+    let blankedTape = Map.map (\(_,xs) -> (ColorBlank,xs)) oldTape
+    modifyIORef state (\state -> state { state_config = Config x (Tape blankedTape) x' })
+keyboardMouse state (GLUT.Char 'w') GLUT.Down _ _ = do
+    camera <- state_camera `fmap` readIORef state
+    let Camera { camera_r = r , camera_theta = theta , camera_phi = phi } = camera
+    modifyIORef state (\state -> state { state_camera = Camera { camera_r = r , camera_theta = theta + 0.1, camera_phi = phi }})
+keyboardMouse state (GLUT.Char 's') GLUT.Down _ _ = do
+    camera <- state_camera `fmap` readIORef state
+    let Camera { camera_r = r , camera_theta = theta , camera_phi = phi } = camera
+    modifyIORef state (\state -> state { state_camera = Camera { camera_r = r , camera_theta = theta , camera_phi = phi + 0.1}})
+keyboardMouse state (GLUT.Char '1') GLUT.Down _ _ = do
+    modifyIORef state (\state -> state { state_config = move (0, ColorGreen, 0) (state_config state) })
+keyboardMouse state (GLUT.Char '2') GLUT.Down _ _ = do
+    modifyIORef state (\state -> state { state_config = move (0, ColorGreen, 1) (state_config state) })
+keyboardMouse state (GLUT.Char '3') GLUT.Down _ _ = do
+    modifyIORef state (\state -> state { state_config = move (0, ColorGreen, 2) (state_config state) })
+keyboardMouse state (GLUT.Char '4') GLUT.Down _ _ = do
+    modifyIORef state (\state -> state { state_config = move (0, ColorGreen, 3) (state_config state) })
+keyboardMouse state (GLUT.Char '5') GLUT.Down _ _ = do
+    modifyIORef state (\state -> state { state_config = move (0, ColorGreen, 4) (state_config state) })
+keyboardMouse state (GLUT.Char '6') GLUT.Down _ _ = do
+    modifyIORef state (\state -> state { state_config = move (0, ColorGreen, 5) (state_config state) })
+keyboardMouse _ _ _ _ _ = return ()
+
+display :: IORef State -> GLUT.DisplayCallback
+display state = do
+  clear [ColorBuffer, DepthBuffer]
+  setupDisplay state
+  drawSphere state
+  GLUT.swapBuffers
+  
+idle :: IORef State -> GLUT.IdleCallback
+idle state = do
+    modifyIORef state (\state -> state { state_t = state_t state + 1 })
+    modifyIORef state (\state -> state { state_config = last (take 20 (iterate (step (state_tm state)) (state_config state))) })
+    --threadDelay $ 100000
+    GLUT.postRedisplay Nothing
+    return ()
+ 
+lightDiffuse :: Color4 GLfloat
+lightDiffuse = Color4 1.0 0.0 0.0 1.0
+ 
+lightPosition :: Vertex4 GLfloat
+lightPosition = Vertex4 1.0 1.0 1.0 0.0
+ 
+initfn :: IO ()
+initfn = let light0 = Light 0 
+         in do --diffuse light0 $= lightDiffuse
+               --position light0 $= lightPosition
+               --light light0 $= Enabled
+               --lighting $= Enabled
+               
+               polygonMode $= (Line, Line)
+ 
+               depthFunc $= Just Lequal
+ 
+               matrixMode $= Projection
+               perspective 40.0 1.0 1.0 10.0
+               
+               matrixMode $= Modelview 0
+               lookAt (Vertex3 0.0 0.0 5.0) (Vertex3 0.0 0.0 0.0) (Vector3 0.0 1.0 0.0)
+  
+               translate ((Vector3 0.0 0.0 (-1.0))::Vector3 GLfloat)
+               rotate 60    ((Vector3 1.0 0.0 0.0)::Vector3 GLfloat)
+               rotate (-20) ((Vector3 0.0 0.0 1.0)::Vector3 GLfloat)
+
+               clearColor $= Color4 0.3 0.3 0.3 1.0
+
+leTm = TM [((0,ColorBlank),(0,ColorRed,3)),((0,ColorRed),(1,ColorGreen,0)),((0,ColorGreen),(0,ColorRed,3)),((0,ColorBlue),(1,ColorGreen,0)),((1,ColorBlank),(0,ColorGreen,3)),((1,ColorRed),(1,ColorBlue,3)),((1,ColorGreen),(0,ColorRed,3)),((1,ColorBlue),(0,ColorGreen,2)),((2,ColorBlank),(0,ColorGreen,4)),((2,ColorRed),(1,ColorRed,3)),((2,ColorGreen),(2,ColorGreen,0)),((2,ColorBlue),(0,ColorBlue,4))] 
+
+main :: IO ()
+main = do
+  GLUT.getArgsAndInitialize
+  GLUT.initialDisplayMode $= [GLUT.DoubleBuffered, GLUT.RGBMode, GLUT.WithDepthBuffer]
+  GLUT.createWindow "Sphere-Band TM"
+  GLUT.windowSize $= Size 1280 1024
+
+  --tm <- Random.evalRandIO (randomTM 3)
+  --print tm
+
+  let myTm = TM [ ((q,c),(q,ColorGreen,3))  | q <- [0..2], c <- [ColorBlank,ColorRed,ColorGreen,ColorBlue]]
+  
+  let tm = myTm
+
+  let globe@(globe_vs, globe_fs) = foldl' (\x _ -> split x) icosahedron [0..3] 
+      tape = initTape (globe_vs, globe_fs)
+      firstSucc = head $ neighbors 0 globe_fs
+  
+  let Tape aaa = tape
+  
+  print (Map.lookup 0 aaa)
+
+  state <- newIORef $ State { state_config = Config (firstSucc,0) tape 0
+                            , state_camera = Camera { camera_r = 5
+                                                    , camera_theta = 0
+                                                    , camera_phi = 0
+                                                    }
+                            , state_t = 0
+                            , state_globe = (globe_vs, globe_fs)
+                            , state_globe_map = globe_vs
+                            , state_position = 0
+                            , state_tm = tm
+                            }
+  GLUT.displayCallback $= display state
+  GLUT.idleCallback $= Just (idle state)
+  GLUT.keyboardMouseCallback $= Just (keyboardMouse state)
+  initfn
+  GLUT.mainLoop

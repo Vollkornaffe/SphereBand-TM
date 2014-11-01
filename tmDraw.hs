@@ -15,28 +15,30 @@ import Data.Set (Set)
 import qualified Control.Monad.Random as Random
 import Debug.Trace
 import Control.Concurrent (threadDelay)
+import Numeric.LinearAlgebra.LAPACK
+import Data.Packed.Matrix
 
 data Camera = Camera { camera_r :: Float
                      , camera_theta :: Float
                      , camera_phi :: Float
                      }
 
-type VertexIndex = Int
-type Mesh = ([Vertex3 GLfloat], [[VertexIndex]])
+type VId = Int
+type Mesh = ([Vertex3 GLfloat], [[VId]])
 
 data State = State { state_config :: Config
                    , state_camera :: Camera
                    , state_t :: Int
                    , state_globe :: Mesh
-                   , state_globe_map :: Map VertexIndex (Vertex3 GLfloat)
-                   , state_position :: VertexIndex
+                   , state_globe_map :: Map VId (Vertex3 GLfloat)
+                   , state_position :: VId
                    , state_tm :: TM
                    }
 
 data TapeColor = ColorBlank | ColorRed | ColorGreen | ColorBlue deriving (Show,Eq)
 type Q = Int
-data Tape = Tape (Map VertexIndex (TapeColor, [VertexIndex])) deriving Show
-data Config = Config (VertexIndex, VertexIndex) Tape Q
+data Tape = Tape (Map VId (TapeColor, [VId])) deriving Show
+data Config = Config (VId, VId) Tape Q
 type Direction = Int
 data TM = TM [((Q, TapeColor), (Q, TapeColor, Direction))] deriving Show
 
@@ -46,23 +48,24 @@ removeDups (x:rest) sofar
      | Set.member x sofar = (removeDups rest sofar)
      | otherwise          = x:(removeDups rest (Set.insert x sofar))
 
-neighbors :: VertexIndex -> [[VertexIndex]] -> [VertexIndex]
+neighbors :: VId -> [[VId]] -> [VId]
 neighbors i = (\ns -> removeDups ns Set.empty) . concat . map (filter (/= i)) . filter (i `elem`)
 
 initTape :: Mesh -> Tape
 initTape (vs, fs) = foldl' (f (vs, fs)) (Tape $ Map.empty) [0..length vs-1]
-    where f :: ([Vertex3 GLfloat], [[VertexIndex]]) -> Tape -> VertexIndex -> Tape
+    where f :: ([Vertex3 GLfloat], [[VId]]) -> Tape -> VId -> Tape
           f (vs, fs) (Tape tape) i = let p = vs !! i
                                          ns = neighbors i fs
                                          ns' = orderNeighbors p (zip ns (map (vs !!) ns))
                                      in Tape $ Map.insert i (ColorBlank, (ns')) tape
 
-          orderNeighbors :: Vertex3 GLfloat -> [(VertexIndex, Vertex3 GLfloat)] -> [VertexIndex]
+          orderNeighbors :: Vertex3 GLfloat -> [(VId, Vertex3 GLfloat)] -> [VId]
           orderNeighbors p ns@((_,r):_) = map fst $ sortBy (\(i1, p1) (i2, p2) -> order p r p1 p2) ns
 
 order :: Vertex3 GLfloat -> Vertex3 GLfloat -> Vertex3 GLfloat -> Vertex3 GLfloat -> Ordering
-order p r p1 p2 = compare (atan2 yP1'' xP1'') (atan2 yP2'' xP2'')
-    where (Vertex3 xP yP zP) = normalizeVertex p
+order p r p1 p2 = compare (bugfix (atan2 yP1'' xP1'')) (bugfix (atan2 yP2'' xP2''))
+    where bugfix x = if (x<0) then x + 2*pi else x
+          (Vertex3 xP yP zP) = normalizeVertex p
           (Vertex3 xP1 yP1 zP1) = projectToPlane p1
           (Vertex3 xP2 yP2 zP2) = projectToPlane p2
           
@@ -76,23 +79,32 @@ order p r p1 p2 = compare (atan2 yP1'' xP1'') (atan2 yP2'' xP2'')
                                                             (zP * xR - xP * zR)
                                                             (xP * yR - yP * xR)
           
-          xP1'' = (f (array (1,3) (zip [1,2,3] (map g [xP1,yP1,zP1])))) ! 1
+          xP1'' = (@@>) luRes (0,0)
+          yP1'' = (@@>) luRes (1,0)
+          xP2'' = (@@>) luRes (0,1)
+          yP2'' = (@@>) luRes (1,1)
+          g (CFloat a) = Float.float2Double a
+          luRes = linearSolveR ((3><3) (map g [xR,xR',xP,yR,yR',yP,zR,zR',zP]))
+                               ((3><2) (map g [xP1,xP2,yP1,yP2,zP1,zP2]))
+          
+  
+          {-xP1'' = (f (array (1,3) (zip [1,2,3] (map g [xP1,yP1,zP1])))) ! 1
           yP1'' = (f (array (1,3) (zip [1,2,3] (map g [xP1,yP1,zP1])))) ! 2
           xP2'' = (f (array (1,3) (zip [1,2,3] (map g [xP2,yP2,zP2])))) ! 1
           yP2'' = (f (array (1,3) (zip [1,2,3] (map g [xP2,yP2,zP2])))) ! 2
-          g (CFloat a) = Float.float2Double a
+          
           f :: Array Int Double -> Array Int Double
           f = lu_solve (array ((1,1),(3,3)) (zip 
                                              [(i,j) | i<-[1,2,3], j<-[1,2,3]] 
                                              (map g [xR,xR',xP,
                                                      yR,yR',yP,
-                                                     zR,zR',zP])))
+                                                     zR,zR',zP])))-}
           
 
 randomTM :: Random.RandomGen g => Q -> Random.Rand g TM
 randomTM numQ = do trans <- mapM (\(q, c) -> do q' <- Random.getRandomR (0, numQ-1)
                                                 c' <- randomColor
-                                                d  <- Random.getRandomR (0,5)
+                                                d  <- Random.getRandomR (0,2)
                                                 return ((q, c), (q', c', d)))
                                  [(q, c) | q <- [0..numQ-1], c <- [ColorBlank, ColorRed, ColorGreen, ColorBlue]]
                    return (TM trans)
@@ -112,9 +124,9 @@ step (TM trans) (Config (oldId, curId) (Tape tape) q) = let Just (c, ns) = Map.l
                                                             tape' = Tape $ Map.insert curId (c', ns) tape
                                                             Just refIdx = Data.List.elemIndex oldId ns
                                                             newId = if (length ns == 5)
-                                                                    then if (dir /= 6) 
-                                                                         then ns !! ((refIdx + dir) `mod` 5)
-                                                                         else case curId of
+                                                                    then if (dir /= 1) 
+                                                                         then ns !! ((refIdx + if dir == 0 then 2 else 3) `mod` 5)
+                                                                         else oldId {-case curId of
                                                                               0 -> 2 
                                                                               1 -> 3
                                                                               2 -> 0
@@ -127,8 +139,8 @@ step (TM trans) (Config (oldId, curId) (Tape tape) q) = let Just (c, ns) = Map.l
                                                                               9 -> 11
                                                                               10 -> 8
                                                                               11 -> 9
-                                                                              _ -> error "this shouldn't happen" 
-                                                                    else ns !! ((refIdx + dir) `mod` 6)
+                                                                              _ -> error "this shouldn't happen" -}
+                                                                    else ns !! ((refIdx + dir + 2) `mod` 6)
                                                         in  Config (curId, newId) tape' q'
 
 normalizeVertex :: Vertex3 GLfloat -> Vertex3 GLfloat
@@ -170,7 +182,7 @@ icosahedron_color = [ Color4 1.0 0.0 0.0 1.0
                     , Color4 0.2 0.2 0.2 1.0
                     ]
                     
-icosahedron_faces :: [[VertexIndex]]
+icosahedron_faces :: [[VId]]
 icosahedron_faces = [[0,11,5], [0,5,1], [0,1,7], [0,7,10], [0,10,11],
                      [1,5,9], [5,11,4], [11,10,2], [10,7,6], [7,1,8],
                      [3,9,4], [3,4,2], [3,2,6], [3,6,8], [3,8,9],
@@ -179,12 +191,12 @@ icosahedron_faces = [[0,11,5], [0,5,1], [0,1,7], [0,7,10], [0,10,11],
 icosahedron :: Mesh
 icosahedron = (icosahedron_v, icosahedron_faces)
 
-type SplitCache = [((VertexIndex, VertexIndex), VertexIndex)]
+type SplitCache = [((VId, VId), VId)]
           
 split :: Mesh -> Mesh
 split (vs, fs) = let (mesh, _) = foldl' f ((vs, []), []) fs
                  in mesh
-    where f :: (Mesh, SplitCache) -> [VertexIndex] -> (Mesh, SplitCache)
+    where f :: (Mesh, SplitCache) -> [VId] -> (Mesh, SplitCache)
           f ((vs, fs), sc) [i1,i2,i3] = let (a, (vs',   sc'))   = get_middle i1 i2 (vs, sc)
                                             (b, (vs'',  sc''))  = get_middle i2 i3 (vs', sc')
                                             (c, (vs''', sc''')) = get_middle i3 i1 (vs'', sc'')
@@ -195,7 +207,7 @@ split (vs, fs) = let (mesh, _) = foldl' f ((vs, []), []) fs
                                             f4 = [a, b, c]
                                         in ((vs''', f1:f2:f3:f4:fs), sc''')
                                             
-          get_middle :: VertexIndex -> VertexIndex -> ([Vertex3 GLfloat], SplitCache) -> (VertexIndex, ([Vertex3 GLfloat], SplitCache))
+          get_middle :: VId -> VId -> ([Vertex3 GLfloat], SplitCache) -> (VId, ([Vertex3 GLfloat], SplitCache))
           get_middle i1 i2 mesh@(vs, sc) = case lookup (min i1 i2, max i1 i2) sc of
                                                Just i -> (i, mesh)
                                                Nothing -> let m = calc_middle (vs !! i1) (vs !! i2)
@@ -242,7 +254,7 @@ drawSphere state =  do (vertices, faces) <- state_globe `fmap` readIORef state
           c ColorGreen = Color4 0 1 0 1
           c ColorBlue  = Color4 0 0 1 1
           
-          --ctest :: VertexIndex -> [VertexIndex] -> Color4 GLfloat
+          --ctest :: VId -> [VId] -> Color4 GLfloat
           --ctest p ns = let Just idx = List.elemIndex p ns
           --                 x = fromRational idx / 5.0
           --             in Color4 x x x 1.0
@@ -280,11 +292,11 @@ setupDisplay state = do
     
 keyboardMouse :: IORef State -> GLUT.Key -> GLUT.KeyState -> GLUT.Modifiers -> GLUT.Position -> IO ()
 keyboardMouse state (GLUT.Char 'r') GLUT.Down _ _ = do
-    tm <- Random.evalRandIO (randomTM 3)
+    tm <- Random.evalRandIO (randomTM 4)
     print tm
     modifyIORef state (\state -> state { state_tm = tm })
 keyboardMouse state (GLUT.Char 't') GLUT.Down _ _ = do
-    tm <- Random.evalRandIO (randomTM 3)
+    tm <- Random.evalRandIO (randomTM 4)
     print tm
     modifyIORef state (\state -> state { state_tm = tm })
     Config x (Tape oldTape) x' <- state_config `fmap` readIORef state
@@ -310,8 +322,7 @@ display state = do
 idle :: IORef State -> GLUT.IdleCallback
 idle state = do
     modifyIORef state (\state -> state { state_t = state_t state + 1 })
-    modifyIORef state (\state -> state { state_config = last (take 2 (iterate (step (state_tm state)) (state_config state))) })
-    threadDelay $ 100000
+    modifyIORef state (\state -> state { state_config = last (take 20 (iterate (step (state_tm state)) (state_config state))) })
     GLUT.postRedisplay Nothing
     return ()
  
@@ -328,7 +339,7 @@ initfn = let light0 = Light 0
                --light light0 $= Enabled
                --lighting $= Enabled
                
-               polygonMode $= (Line, Line)
+               polygonMode $= (Fill, Line)
  
                depthFunc $= Just Lequal
  
@@ -354,11 +365,11 @@ main = do
   --tm <- Random.evalRandIO (randomTM 3)
   --print tm
 
-  let myTm = TM [ ((q,c),(q,ColorGreen,3))  | q <- [0..2], c <- [ColorBlank,ColorRed,ColorGreen,ColorBlue]]
+  let myTm = TM [ ((q,c),(q,ColorGreen,5))  | q <- [0..2], c <- [ColorBlank,ColorRed,ColorGreen,ColorBlue]]
   
   let tm = myTm  
 
-  let globe@(globe_vs, globe_fs) = (iterate split icosahedron) !! 5
+  let globe@(globe_vs, globe_fs) = (iterate split icosahedron) !! 6
       tape = initTape globe
       globe_map = Map.fromList (zip [0..] globe_vs)
       firstSucc = head $ neighbors 0 globe_fs
