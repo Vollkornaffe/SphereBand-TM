@@ -5,6 +5,7 @@ import Data.Array
 import Matrix.LU
 import Unsafe.Coerce
 import Data.List
+import Data.Maybe (fromJust)
 import Foreign.C.Types 
 import qualified GHC.Float as Float
 import GHC.Float (Float)
@@ -24,7 +25,7 @@ data Camera = Camera { camera_r :: Float
                      }
 
 type VId = Int
-type Mesh = ([Vertex3 GLfloat], [[VId]])
+type Mesh = (Map VId (Vertex3 GLfloat), [[VId]])
 
 data State = State { state_config :: Config
                    , state_camera :: Camera
@@ -52,12 +53,11 @@ neighbors :: VId -> [[VId]] -> [VId]
 neighbors i = (\ns -> removeDups ns Set.empty) . concat . map (filter (/= i)) . filter (i `elem`)
 
 initTape :: Mesh -> Tape
-initTape (vs, fs) = foldl' (f (vs, fs)) (Tape $ Map.empty) [0..length vs-1]
-    where f :: ([Vertex3 GLfloat], [[VId]]) -> Tape -> VId -> Tape
-          f (vs, fs) (Tape tape) i = let p = vs !! i
-                                         ns = neighbors i fs
-                                         ns' = orderNeighbors p (zip ns (map (vs !!) ns))
-                                     in Tape $ Map.insert i (ColorBlank, (ns')) tape
+initTape mesh@(vs, fs) = Tape $ Map.mapWithKey (f mesh) vs --foldl' (f (vs, fs)) (Tape $ Map.empty) (Map.keys vs)
+    where f :: Mesh -> VId -> Vertex3 GLfloat -> (TapeColor, [VId])
+          f (vs, fs) i p = let ns = neighbors i fs
+                               ns' = orderNeighbors p (zip ns (map (fromJust . flip Map.lookup vs) ns))
+                           in (ColorBlank, (ns'))
 
           orderNeighbors :: Vertex3 GLfloat -> [(VId, Vertex3 GLfloat)] -> [VId]
           orderNeighbors p ns@((_,r):_) = map fst $ sortBy (\(i1, p1) (i2, p2) -> order p r p1 p2) ns
@@ -189,12 +189,12 @@ icosahedron_faces = [[0,11,5], [0,5,1], [0,1,7], [0,7,10], [0,10,11],
                      [4,9,5], [2,4,11], [6,2,10], [8,6,7], [9,8,1]]
 
 icosahedron :: Mesh
-icosahedron = (icosahedron_v, icosahedron_faces)
+icosahedron = (Map.fromList (zip [0..] icosahedron_v), icosahedron_faces)
 
-type SplitCache = [((VId, VId), VId)]
+type SplitCache = Map (VId, VId) VId
           
 split :: Mesh -> Mesh
-split (vs, fs) = let (mesh, _) = foldl' f ((vs, []), []) fs
+split (vs, fs) = let (mesh, _) = foldl' f ((vs, []), Map.empty) fs
                  in mesh
     where f :: (Mesh, SplitCache) -> [VId] -> (Mesh, SplitCache)
           f ((vs, fs), sc) [i1,i2,i3] = let (a, (vs',   sc'))   = get_middle i1 i2 (vs, sc)
@@ -207,13 +207,13 @@ split (vs, fs) = let (mesh, _) = foldl' f ((vs, []), []) fs
                                             f4 = [a, b, c]
                                         in ((vs''', f1:f2:f3:f4:fs), sc''')
                                             
-          get_middle :: VId -> VId -> ([Vertex3 GLfloat], SplitCache) -> (VId, ([Vertex3 GLfloat], SplitCache))
-          get_middle i1 i2 mesh@(vs, sc) = case lookup (min i1 i2, max i1 i2) sc of
+          get_middle :: VId -> VId -> (Map Int (Vertex3 GLfloat), SplitCache) -> (VId, (Map Int (Vertex3 GLfloat), SplitCache))
+          get_middle i1 i2 mesh@(vs, sc) = case Map.lookup (min i1 i2, max i1 i2) sc of
                                                Just i -> (i, mesh)
-                                               Nothing -> let m = calc_middle (vs !! i1) (vs !! i2)
-                                                              vs' = vs ++ [m]
-                                                              i = length vs
-                                                              sc' = ((min i1 i2, max i1 i2), i) : sc
+                                               Nothing -> let m = calc_middle (fromJust $ Map.lookup i1 vs) (fromJust $ Map.lookup i2 vs)
+                                                              i = Map.size vs
+                                                              vs' = Map.insert i m vs
+                                                              sc' = Map.insert (min i1 i2, max i1 i2) i sc
                                                           in (i, (vs', sc'))
                                                         
           calc_middle :: Vertex3 GLfloat -> Vertex3 GLfloat -> Vertex3 GLfloat
@@ -260,7 +260,7 @@ drawSphere state =  do (vertices, faces) <- state_globe `fmap` readIORef state
           --             in Color4 x x x 1.0
  
 calcCamPos :: Camera -> Vertex3 GLdouble
-calcCamPos Camera { camera_r = r , camera_theta = theta , camera_phi = phi } = Vertex3 (realToFrac $ r*(sin theta)*(cos phi)) (realToFrac $ r*(sin theta)*(sin phi)) (realToFrac $ r*(cos theta))
+calcCamPos Camera { camera_r = r , camera_theta = theta , camera_phi = phi } = Vertex3 (realToFrac $ r*(sin theta)*(cos phi)) (realToFrac $ r*(cos theta)) (realToFrac $ r*(sin theta)*(sin phi))
  
 setupDisplay :: IORef State -> GLUT.DisplayCallback
 setupDisplay state = do
@@ -268,7 +268,7 @@ setupDisplay state = do
     Config (_, p) _ q <- state_config `fmap` readIORef state
     --print q
     i <- state_t `fmap` readIORef state
-    let Vertex3 px py pz = vertices !! p
+    let Vertex3 px py pz = fromJust $ Map.lookup p vertices 
     let dist = 3
     let camPos = Vertex3 (realToFrac $ px * dist) (realToFrac $ py * dist) (realToFrac $ pz * dist) :: Vertex3 GLdouble
     
@@ -305,12 +305,16 @@ keyboardMouse state (GLUT.Char 't') GLUT.Down _ _ = do
 keyboardMouse state (GLUT.Char 'w') GLUT.Down _ _ = do
     camera <- state_camera `fmap` readIORef state
     let Camera { camera_r = r , camera_theta = theta , camera_phi = phi } = camera
-    modifyIORef state (\state -> state { state_camera = Camera { camera_r = r , camera_theta = theta + 0.1, camera_phi = phi }})
+    modifyIORef state (\state -> state { state_camera = Camera { camera_r = r , camera_theta = if (theta + 0.1 > pi) then 0 else theta + 0.1, camera_phi = phi }})
 keyboardMouse state (GLUT.Char 's') GLUT.Down _ _ = do
     camera <- state_camera `fmap` readIORef state
     let Camera { camera_r = r , camera_theta = theta , camera_phi = phi } = camera
     modifyIORef state (\state -> state { state_camera = Camera { camera_r = r , camera_theta = theta , camera_phi = phi + 0.1}})
 keyboardMouse _ _ _ _ _ = return ()
+keyboardMouse state _ _ _ (Position (CInt x) (CInt y)) = do
+    camera <- state_camera `fmap` readIORef state
+    let Camera { camera_r = r , camera_theta = theta , camera_phi = phi } = camera
+    modifyIORef state (\state -> state { state_camera = Camera { camera_r = r , camera_theta =  ((2*pi)/1280)*(fromIntegral y) , camera_phi =(pi/1024)*(fromIntegral x) }})
 
 display :: IORef State -> GLUT.DisplayCallback
 display state = do
@@ -322,7 +326,7 @@ display state = do
 idle :: IORef State -> GLUT.IdleCallback
 idle state = do
     modifyIORef state (\state -> state { state_t = state_t state + 1 })
-    modifyIORef state (\state -> state { state_config = last (take 20 (iterate (step (state_tm state)) (state_config state))) })
+    modifyIORef state (\state -> state { state_config = last (take 100 (iterate (step (state_tm state)) (state_config state))) })
     GLUT.postRedisplay Nothing
     return ()
  
@@ -365,13 +369,12 @@ main = do
   --tm <- Random.evalRandIO (randomTM 3)
   --print tm
 
-  let myTm = TM [ ((q,c),(q,ColorGreen,5))  | q <- [0..2], c <- [ColorBlank,ColorRed,ColorGreen,ColorBlue]]
+  let myTm = TM [ ((q,c),(q,ColorGreen,1))  | q <- [0..2], c <- [ColorBlank,ColorRed,ColorGreen,ColorBlue]]
   
   let tm = myTm  
 
   let globe@(globe_vs, globe_fs) = (iterate split icosahedron) !! 6
       tape = initTape globe
-      globe_map = Map.fromList (zip [0..] globe_vs)
       firstSucc = head $ neighbors 0 globe_fs
 
   state <- newIORef $ State { state_config = Config (firstSucc,0) tape 0
@@ -381,7 +384,7 @@ main = do
                                                     }
                             , state_t = 0
                             , state_globe = (globe_vs, globe_fs)
-                            , state_globe_map = globe_map 
+                            , state_globe_map = globe_vs 
                             , state_position = 0
                             , state_tm = tm
                             }
